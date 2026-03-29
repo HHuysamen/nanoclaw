@@ -27,6 +27,7 @@ import {
 } from './container-runtime.js';
 import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
+import { readEnvFile } from './env.js';
 import { RegisteredGroup } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
@@ -245,19 +246,32 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // OneCLI gateway handles credential injection — containers never see real secrets.
-  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false, // Nanoclaw already handles host gateway
-    agent: agentIdentifier,
-  });
-  if (onecliApplied) {
-    logger.info({ containerName }, 'OneCLI gateway config applied');
+  // Credential injection: prefer direct env vars over OneCLI proxy.
+  // OneCLI's HTTPS proxy doesn't reliably handle OAuth tokens from Claude
+  // subscriptions, so when credentials exist in .env we pass them directly
+  // and skip the proxy entirely.
+  const envVars = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  if (envVars.CLAUDE_CODE_OAUTH_TOKEN || envVars.ANTHROPIC_API_KEY) {
+    if (envVars.CLAUDE_CODE_OAUTH_TOKEN) {
+      args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${envVars.CLAUDE_CODE_OAUTH_TOKEN}`);
+    } else {
+      args.push('-e', `ANTHROPIC_API_KEY=${envVars.ANTHROPIC_API_KEY}`);
+    }
+    logger.info({ containerName }, 'Direct credentials applied from .env');
   } else {
-    logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
-    );
+    // Fall back to OneCLI gateway for credential injection
+    const onecliApplied = await onecli.applyContainerConfig(args, {
+      addHostMapping: false, // Nanoclaw already handles host gateway
+      agent: agentIdentifier,
+    });
+    if (onecliApplied) {
+      logger.info({ containerName }, 'OneCLI gateway config applied');
+    } else {
+      logger.warn(
+        { containerName },
+        'OneCLI gateway not reachable — container will have no credentials',
+      );
+    }
   }
 
   // Runtime-specific args for host gateway resolution
