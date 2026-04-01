@@ -280,24 +280,43 @@ export class GmailChannel implements Channel {
     // Store chat metadata for group discovery
     this.opts.onChatMetadata(chatJid, timestamp, subject, 'gmail', false);
 
-    // Find the main group to deliver the email notification
+    // Find the target group to deliver the email notification.
+    // Route to a specific group by folder name if GMAIL_TARGET_GROUP is set,
+    // otherwise fall back to the main group.
     const groups = this.opts.registeredGroups();
-    const mainEntry = Object.entries(groups).find(([, g]) => g.isMain === true);
+    const targetFolder = process.env.GMAIL_TARGET_GROUP;
+    let targetEntry: [string, RegisteredGroup] | undefined;
 
-    if (!mainEntry) {
+    if (targetFolder) {
+      targetEntry = Object.entries(groups).find(
+        ([, g]) => g.folder === targetFolder,
+      );
+      if (!targetEntry) {
+        logger.warn(
+          { targetFolder },
+          'GMAIL_TARGET_GROUP not found among registered groups, falling back to main',
+        );
+      }
+    }
+
+    if (!targetEntry) {
+      targetEntry = Object.entries(groups).find(([, g]) => g.isMain === true);
+    }
+
+    if (!targetEntry) {
       logger.debug(
         { chatJid, subject },
-        'No main group registered, skipping email',
+        'No target group registered, skipping email',
       );
       return;
     }
 
-    const mainJid = mainEntry[0];
+    const targetJid = targetEntry[0];
     const content = `[Email from ${senderName} <${senderEmail}>]\nSubject: ${subject}\n\n${body}`;
 
-    this.opts.onMessage(mainJid, {
+    this.opts.onMessage(targetJid, {
       id: messageId,
-      chat_jid: mainJid,
+      chat_jid: targetJid,
       sender: senderEmail,
       sender_name: senderName,
       content,
@@ -317,8 +336,8 @@ export class GmailChannel implements Channel {
     }
 
     logger.info(
-      { mainJid, from: senderName, subject },
-      'Gmail email delivered to main group',
+      { targetJid, from: senderName, subject, targetFolder },
+      'Gmail email delivered to target group',
     );
   }
 

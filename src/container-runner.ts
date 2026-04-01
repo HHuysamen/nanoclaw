@@ -253,7 +253,10 @@ async function buildContainerArgs(
   const envVars = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
   if (envVars.CLAUDE_CODE_OAUTH_TOKEN || envVars.ANTHROPIC_API_KEY) {
     if (envVars.CLAUDE_CODE_OAUTH_TOKEN) {
-      args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${envVars.CLAUDE_CODE_OAUTH_TOKEN}`);
+      args.push(
+        '-e',
+        `CLAUDE_CODE_OAUTH_TOKEN=${envVars.CLAUDE_CODE_OAUTH_TOKEN}`,
+      );
     } else {
       args.push('-e', `ANTHROPIC_API_KEY=${envVars.ANTHROPIC_API_KEY}`);
     }
