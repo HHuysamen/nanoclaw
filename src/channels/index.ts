@@ -11,5 +11,5 @@ import './gmail.js';
 // telegram
 import './telegram.js';
 
-// whatsapp
-import './whatsapp.js';
+// whatsapp (disabled — session expired, re-enable with /add-whatsapp)
+// import './whatsapp.js';
