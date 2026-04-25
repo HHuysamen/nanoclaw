@@ -26,6 +26,15 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade npm to latest. Bundled npm in node:22-slim has a broken arborist
+# (missing promise-retry) so self-upgrade fails — replace the lib directly
+# from the registry tarball instead.
+RUN curl -fsSL https://registry.npmjs.org/npm/-/npm-11.13.0.tgz -o /tmp/npm.tgz \
+    && rm -rf /usr/local/lib/node_modules/npm \
+    && mkdir /usr/local/lib/node_modules/npm \
+    && tar -xzf /tmp/npm.tgz -C /usr/local/lib/node_modules/npm --strip-components=1 \
+    && rm /tmp/npm.tgz
+
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
