@@ -2,6 +2,7 @@ import https from 'https';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { getRouterState, setRouterState } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -11,6 +12,8 @@ import {
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+
+const JID_BOT_MAP_KEY = 'telegram_jid_to_bot_username';
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -47,8 +50,73 @@ export class TelegramChannel implements Channel {
   private bots: Bot[] = [];
   private opts: TelegramChannelOpts;
   private tokens: string[];
-  // Maps chat JID → Bot instance (learned from inbound messages)
+  // Maps chat JID → Bot instance (learned from inbound messages,
+  // restored at startup from a persisted JID → bot username table)
   private jidToBot: Map<string, Bot> = new Map();
+
+  private readPersistedJidMap(): Record<string, string> {
+    let raw: string | undefined;
+    try {
+      raw = getRouterState(JID_BOT_MAP_KEY);
+    } catch (err) {
+      logger.debug({ err }, 'Telegram: persisted JID map unavailable');
+      return {};
+    }
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw) as Record<string, string>;
+    } catch {
+      return {};
+    }
+  }
+
+  private writePersistedJidMap(map: Record<string, string>): void {
+    try {
+      setRouterState(JID_BOT_MAP_KEY, JSON.stringify(map));
+    } catch (err) {
+      logger.debug({ err }, 'Telegram: failed to persist JID map');
+    }
+  }
+
+  // Tasks fire before any inbound message arrives after a restart, so the
+  // in-memory map is empty and sendMessage falls back to bots[0] — which is
+  // typically not a member of group chats served by other bots and Telegram
+  // returns 400 chat not found. Persisting the mapping prevents that.
+  private learnJidToBot(jid: string, bot: Bot): void {
+    const existing = this.jidToBot.get(jid);
+    this.jidToBot.set(jid, bot);
+    const username = bot.botInfo?.username;
+    if (!username) return;
+    if (existing === bot) return;
+    const stored = this.readPersistedJidMap();
+    if (stored[jid] === username) return;
+    stored[jid] = username;
+    this.writePersistedJidMap(stored);
+  }
+
+  private restoreJidMapFromStorage(): void {
+    const stored = this.readPersistedJidMap();
+    const byUsername = new Map<string, Bot>();
+    for (const bot of this.bots) {
+      const username = bot.botInfo?.username;
+      if (username) byUsername.set(username, bot);
+    }
+    let restored = 0;
+    let stale = 0;
+    for (const [jid, username] of Object.entries(stored)) {
+      const bot = byUsername.get(username);
+      if (bot) {
+        this.jidToBot.set(jid, bot);
+        restored++;
+      } else {
+        stale++;
+      }
+    }
+    logger.info(
+      { restored, stale, totalBots: this.bots.length },
+      'Telegram: restored JID-to-bot mappings',
+    );
+  }
 
   constructor(tokens: string[], opts: TelegramChannelOpts) {
     this.tokens = tokens;
@@ -89,7 +157,7 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
 
       // Learn which bot handles this JID
-      this.jidToBot.set(chatJid, bot);
+      this.learnJidToBot(chatJid, bot);
 
       let content = ctx.message.text;
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
@@ -172,7 +240,7 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
 
       // Learn which bot handles this JID
-      this.jidToBot.set(chatJid, bot);
+      this.learnJidToBot(chatJid, bot);
 
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
@@ -255,6 +323,8 @@ export class TelegramChannel implements Channel {
 
       this.bots.push(bot);
     }
+
+    this.restoreJidMapFromStorage();
   }
 
   /**
@@ -265,44 +335,80 @@ export class TelegramChannel implements Channel {
     return this.jidToBot.get(jid) || this.bots[0] || null;
   }
 
+  private isChatNotFoundError(err: unknown): boolean {
+    const msg =
+      err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+    return /chat not found/i.test(msg);
+  }
+
+  private async sendChunked(
+    bot: Bot,
+    numericId: string,
+    text: string,
+    options: { message_thread_id?: number },
+  ): Promise<void> {
+    const MAX_LENGTH = 4096;
+    if (text.length <= MAX_LENGTH) {
+      await sendTelegramMessage(bot.api, numericId, text, options);
+      return;
+    }
+    for (let i = 0; i < text.length; i += MAX_LENGTH) {
+      await sendTelegramMessage(
+        bot.api,
+        numericId,
+        text.slice(i, i + MAX_LENGTH),
+        options,
+      );
+    }
+  }
+
   async sendMessage(
     jid: string,
     text: string,
     threadId?: string,
   ): Promise<void> {
-    const bot = this.getBotForJid(jid);
-    if (!bot) {
+    const primary = this.getBotForJid(jid);
+    if (!primary) {
       logger.warn('No Telegram bot available');
       return;
     }
 
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-      const options = threadId
-        ? { message_thread_id: parseInt(threadId, 10) }
-        : {};
+    const numericId = jid.replace(/^tg:/, '');
+    const options = threadId
+      ? { message_thread_id: parseInt(threadId, 10) }
+      : {};
 
-      // Telegram has a 4096 character limit per message — split if needed
-      const MAX_LENGTH = 4096;
-      if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(bot.api, numericId, text, options);
-      } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await sendTelegramMessage(
-            bot.api,
-            numericId,
-            text.slice(i, i + MAX_LENGTH),
-            options,
-          );
+    // Try the bot we believe owns the chat. If Telegram says "chat not found",
+    // the mapping is wrong (e.g. JID never seen + persistence empty), so try
+    // the other bots and learn whichever succeeds.
+    const candidates = [primary, ...this.bots.filter((b) => b !== primary)];
+
+    let lastError: unknown = null;
+    for (let i = 0; i < candidates.length; i++) {
+      const bot = candidates[i];
+      try {
+        await this.sendChunked(bot, numericId, text, options);
+        if (bot !== primary) {
+          this.learnJidToBot(jid, bot);
         }
+        logger.info(
+          { jid, length: text.length, threadId },
+          'Telegram message sent',
+        );
+        return;
+      } catch (err) {
+        lastError = err;
+        if (!this.isChatNotFoundError(err) || i === candidates.length - 1) {
+          break;
+        }
+        logger.warn(
+          { jid, attemptedBot: bot.botInfo?.username },
+          'Telegram chat not found via this bot, trying next',
+        );
       }
-      logger.info(
-        { jid, length: text.length, threadId },
-        'Telegram message sent',
-      );
-    } catch (err) {
-      logger.error({ jid, err }, 'Failed to send Telegram message');
     }
+
+    logger.error({ jid, err: lastError }, 'Failed to send Telegram message');
   }
 
   isConnected(): boolean {
