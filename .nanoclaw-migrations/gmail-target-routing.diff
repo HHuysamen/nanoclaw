@@ -1,0 +1,106 @@
+diff --git a/src/channels/gmail.ts b/src/channels/gmail.ts
+index 131f55a..3a17c55 100644
+--- a/src/channels/gmail.ts
++++ b/src/channels/gmail.ts
+@@ -91,9 +91,13 @@ export class GmailChannel implements Channel {
+ 
+     // Start polling with error backoff
+     const schedulePoll = () => {
+-      const backoffMs = this.consecutiveErrors > 0
+-        ? Math.min(this.pollIntervalMs * Math.pow(2, this.consecutiveErrors), 30 * 60 * 1000)
+-        : this.pollIntervalMs;
++      const backoffMs =
++        this.consecutiveErrors > 0
++          ? Math.min(
++              this.pollIntervalMs * Math.pow(2, this.consecutiveErrors),
++              30 * 60 * 1000,
++            )
++          : this.pollIntervalMs;
+       this.pollTimer = setTimeout(() => {
+         this.pollForMessages()
+           .catch((err) => logger.error({ err }, 'Gmail poll error'))
+@@ -210,8 +214,18 @@ export class GmailChannel implements Channel {
+       this.consecutiveErrors = 0;
+     } catch (err) {
+       this.consecutiveErrors++;
+-      const backoffMs = Math.min(this.pollIntervalMs * Math.pow(2, this.consecutiveErrors), 30 * 60 * 1000);
+-      logger.error({ err, consecutiveErrors: this.consecutiveErrors, nextPollMs: backoffMs }, 'Gmail poll failed');
++      const backoffMs = Math.min(
++        this.pollIntervalMs * Math.pow(2, this.consecutiveErrors),
++        30 * 60 * 1000,
++      );
++      logger.error(
++        {
++          err,
++          consecutiveErrors: this.consecutiveErrors,
++          nextPollMs: backoffMs,
++        },
++        'Gmail poll failed',
++      );
+     }
+   }
+ 
+@@ -266,26 +280,43 @@ export class GmailChannel implements Channel {
+     // Store chat metadata for group discovery
+     this.opts.onChatMetadata(chatJid, timestamp, subject, 'gmail', false);
+ 
+-    // Find the main group to deliver the email notification
++    // Find the target group to deliver the email notification.
++    // Route to a specific group by folder name if GMAIL_TARGET_GROUP is set,
++    // otherwise fall back to the main group.
+     const groups = this.opts.registeredGroups();
+-    const mainEntry = Object.entries(groups).find(
+-      ([, g]) => g.isMain === true,
+-    );
++    const targetFolder = process.env.GMAIL_TARGET_GROUP;
++    let targetEntry: [string, RegisteredGroup] | undefined;
++
++    if (targetFolder) {
++      targetEntry = Object.entries(groups).find(
++        ([, g]) => g.folder === targetFolder,
++      );
++      if (!targetEntry) {
++        logger.warn(
++          { targetFolder },
++          'GMAIL_TARGET_GROUP not found among registered groups, falling back to main',
++        );
++      }
++    }
++
++    if (!targetEntry) {
++      targetEntry = Object.entries(groups).find(([, g]) => g.isMain === true);
++    }
+ 
+-    if (!mainEntry) {
++    if (!targetEntry) {
+       logger.debug(
+         { chatJid, subject },
+-        'No main group registered, skipping email',
++        'No target group registered, skipping email',
+       );
+       return;
+     }
+ 
+-    const mainJid = mainEntry[0];
++    const targetJid = targetEntry[0];
+     const content = `[Email from ${senderName} <${senderEmail}>]\nSubject: ${subject}\n\n${body}`;
+ 
+-    this.opts.onMessage(mainJid, {
++    this.opts.onMessage(targetJid, {
+       id: messageId,
+-      chat_jid: mainJid,
++      chat_jid: targetJid,
+       sender: senderEmail,
+       sender_name: senderName,
+       content,
+@@ -305,8 +336,8 @@ export class GmailChannel implements Channel {
+     }
+ 
+     logger.info(
+-      { mainJid, from: senderName, subject },
+-      'Gmail email delivered to main group',
++      { targetJid, from: senderName, subject, targetFolder },
++      'Gmail email delivered to target group',
+     );
+   }
+ 

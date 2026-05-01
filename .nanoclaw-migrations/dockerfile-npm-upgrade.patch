@@ -1,0 +1,32 @@
+commit 16bec9ff03e8bcdaf781606c0117c1123f14520d
+Author: novabot878 <nova878@proton.me>
+Date:   Sat Apr 25 07:14:34 2026 +0200
+
+    chore(container): upgrade npm to 11.13.0
+    
+    The bundled npm in node:22-slim has a broken arborist (missing
+    promise-retry) that prevents in-place self-upgrade. Replace the npm
+    package directory directly from the registry tarball instead.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/container/Dockerfile b/container/Dockerfile
+index e8537c3..a5fb927 100644
+--- a/container/Dockerfile
++++ b/container/Dockerfile
+@@ -26,6 +26,15 @@ RUN apt-get update && apt-get install -y \
+     git \
+     && rm -rf /var/lib/apt/lists/*
+ 
++# Upgrade npm to latest. Bundled npm in node:22-slim has a broken arborist
++# (missing promise-retry) so self-upgrade fails — replace the lib directly
++# from the registry tarball instead.
++RUN curl -fsSL https://registry.npmjs.org/npm/-/npm-11.13.0.tgz -o /tmp/npm.tgz \
++    && rm -rf /usr/local/lib/node_modules/npm \
++    && mkdir /usr/local/lib/node_modules/npm \
++    && tar -xzf /tmp/npm.tgz -C /usr/local/lib/node_modules/npm --strip-components=1 \
++    && rm /tmp/npm.tgz
++
+ # Set Chromium path for agent-browser
+ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium

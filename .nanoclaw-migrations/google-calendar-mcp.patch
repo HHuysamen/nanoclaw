@@ -1,0 +1,65 @@
+commit c69769078e3a2c76df47d5e587da57a49f1411d8
+Author: novabot878 <nova878@proton.me>
+Date:   Sat Apr 25 07:14:27 2026 +0200
+
+    feat: add Google Calendar MCP server
+    
+    Register @cocal/google-calendar-mcp as a dedicated calendar MCP, mount
+    ~/.calendar-mcp/ into the container, and allow mcp__calendar__* tools.
+    Decouples calendar access from the Gmail MCP, which was suffering scope
+    strips from its periodic re-auth.
+    
+    GOOGLE_OAUTH_CREDENTIALS and GOOGLE_CALENDAR_MCP_TOKEN_PATH env vars pin
+    both files inside the bind mount so refreshed tokens persist across
+    container restarts.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/container/agent-runner/src/index.ts b/container/agent-runner/src/index.ts
+index 8c42fff..f37440a 100644
+--- a/container/agent-runner/src/index.ts
++++ b/container/agent-runner/src/index.ts
+@@ -470,6 +470,7 @@ async function runQuery(
+         'NotebookEdit',
+         'mcp__nanoclaw__*',
+         'mcp__gmail__*',
++        'mcp__calendar__*',
+       ],
+       env: sdkEnv,
+       permissionMode: 'bypassPermissions',
+@@ -489,6 +490,14 @@ async function runQuery(
+           command: 'npx',
+           args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+         },
++        calendar: {
++          command: 'npx',
++          args: ['-y', '@cocal/google-calendar-mcp'],
++          env: {
++            GOOGLE_OAUTH_CREDENTIALS: '/home/node/.calendar-mcp/gcp-oauth.keys.json',
++            GOOGLE_CALENDAR_MCP_TOKEN_PATH: '/home/node/.calendar-mcp/tokens.json',
++          },
++        },
+       },
+       hooks: {
+         PreCompact: [
+diff --git a/src/container-runner.ts b/src/container-runner.ts
+index 7ca1d4c..df1b217 100644
+--- a/src/container-runner.ts
++++ b/src/container-runner.ts
+@@ -197,6 +197,16 @@ function buildVolumeMounts(
+     });
+   }
+ 
++  // Google Calendar credentials directory (for Calendar MCP inside the container)
++  const calendarDir = path.join(homeDir, '.calendar-mcp');
++  if (fs.existsSync(calendarDir)) {
++    mounts.push({
++      hostPath: calendarDir,
++      containerPath: '/home/node/.calendar-mcp',
++      readonly: false, // MCP refreshes OAuth tokens
++    });
++  }
++
+   // Per-group IPC namespace: each group gets its own IPC directory
+   // This prevents cross-group privilege escalation via IPC
+   const groupIpcDir = resolveGroupIpcPath(group.folder);
