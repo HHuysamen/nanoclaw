@@ -22,6 +22,7 @@ import {
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { readEnvFile } from './env.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
@@ -459,6 +460,17 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
+
+  // OneCLI sets ANTHROPIC_API_KEY=placeholder for hosts matching api.anthropic.com.
+  // The Claude SDK then sends `x-api-key: placeholder` and Anthropic 401s. If
+  // CLAUDE_CODE_OAUTH_TOKEN is set in the host env / .env, forward it and empty
+  // ANTHROPIC_API_KEY so the Claude Code binary's native OAuth flow runs (Authorization
+  // Bearer at api.anthropic.com). Last -e wins in Docker, so this overrides OneCLI.
+  const claudeOauth = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN']).CLAUDE_CODE_OAUTH_TOKEN;
+  if (claudeOauth) {
+    args.push('-e', 'ANTHROPIC_API_KEY=');
+    args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${claudeOauth}`);
+  }
 
   // Host gateway
   args.push(...hostGatewayArgs());
