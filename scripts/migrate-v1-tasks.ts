@@ -24,6 +24,8 @@ const FOLDER_MAP: Record<string, string> = {
   moneypenny: 'moneypenny',
   lova: 'lova',
   linus: 'linus',
+  telegram_main: 'dm-with-henry',
+  main: 'dm-with-henry',
 };
 
 interface V1Task {
