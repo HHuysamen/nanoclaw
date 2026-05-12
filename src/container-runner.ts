@@ -15,6 +15,8 @@ import {
   CONTAINER_INSTALL_LABEL,
   DATA_DIR,
   GROUPS_DIR,
+  MEMORY_VAULT_DIR,
+  MEMORY_VAULT_PATH,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
@@ -271,6 +273,15 @@ function buildMounts(
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 
+  // Adaptive memory — bounded curated memory files. Empty-seed on first spawn
+  // so memory_read in the agent's MCP server always returns a string.
+  ensureMemorySeedFiles(groupDir);
+
+  // Adaptive memory — shared SQLite vault across all agent groups. journal_mode=DELETE
+  // is set inside the container; see container/agent-runner/src/db/vault.ts for why.
+  ensureMemoryVault();
+  mounts.push({ hostPath: MEMORY_VAULT_PATH, containerPath: '/vault/vault.db', readonly: false });
+
   // container.json — nested RO mount on top of RW group dir so the agent
   // can read its config but cannot modify it.
   const containerJsonPath = path.join(groupDir, 'container.json');
@@ -393,6 +404,36 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     }
     if (!exists) {
       fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+    }
+  }
+}
+
+/**
+ * Adaptive memory — make sure the bind-mount target exists before docker
+ * mounts it. Docker happily mounts a nonexistent file as a directory,
+ * which then breaks `bun:sqlite` opens with "unable to open database".
+ * Touch the file (creates an empty one if missing) so SQLite can open it
+ * and the in-container vault layer runs the schema bootstrap.
+ */
+function ensureMemoryVault(): void {
+  if (!fs.existsSync(MEMORY_VAULT_DIR)) {
+    fs.mkdirSync(MEMORY_VAULT_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(MEMORY_VAULT_PATH)) {
+    fs.closeSync(fs.openSync(MEMORY_VAULT_PATH, 'w'));
+  }
+}
+
+/**
+ * Adaptive memory — empty-seed `MEMORY.md` and `USER.md` in the agent group
+ * dir so that the agent's first `memory_read` call returns strings, not null.
+ * Idempotent.
+ */
+function ensureMemorySeedFiles(groupDir: string): void {
+  for (const name of ['MEMORY.md', 'USER.md']) {
+    const filePath = path.join(groupDir, name);
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, '');
     }
   }
 }

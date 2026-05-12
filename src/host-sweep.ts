@@ -31,6 +31,8 @@ import fs from 'fs';
 
 import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { SESSION_IDLE_MS } from './config.js';
+import { closeSessionAt, findStaleOpenSessions } from './modules/memory/vault-host.js';
 import {
   countDueMessages,
   getContainerState,
@@ -127,6 +129,24 @@ async function sweep(): Promise<void> {
     }
   } catch (err) {
     log.error('Host sweep error', { err });
+  }
+
+  // Adaptive memory — close stale vault sessions so `session_recent` reflects
+  // reality and the summary job (when added) has a clear set of closed
+  // sessions to process. Idle = no new turn for SESSION_IDLE_MS.
+  try {
+    const now = Date.now();
+    const stale = findStaleOpenSessions(SESSION_IDLE_MS, now);
+    for (const s of stale) {
+      closeSessionAt(s.id, now);
+      log.info('Closed idle vault session', {
+        sessionId: s.id,
+        agentGroup: s.agent_group_id,
+        idleMs: now - s.last_ts,
+      });
+    }
+  } catch (err) {
+    log.warn('Vault session sweep error', { err: err instanceof Error ? err.message : String(err) });
   }
 
   setTimeout(sweep, SWEEP_INTERVAL_MS);

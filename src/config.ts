@@ -23,6 +23,23 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
+// Adaptive memory — single shared SQLite vault across all agent groups,
+// bind-mounted into every agent container at `/vault/vault.db`. Schema
+// bootstrap + reads/writes happen inside the container via
+// `container/agent-runner/src/db/vault.ts`. journal_mode=DELETE for the
+// same cross-mount reasons as the per-session DBs.
+export const MEMORY_VAULT_DIR = path.resolve(DATA_DIR, 'memory');
+export const MEMORY_VAULT_PATH = path.join(MEMORY_VAULT_DIR, 'vault.db');
+export const MEMORY_CHAR_CAP = Math.max(256, parseInt(process.env.NANOCLAW_MEMORY_CHAR_CAP || '2200', 10) || 2200);
+export const USER_PROFILE_CHAR_CAP = Math.max(
+  256,
+  parseInt(process.env.NANOCLAW_USER_PROFILE_CHAR_CAP || '1375', 10) || 1375,
+);
+export const SESSION_IDLE_MS = Math.max(
+  60_000,
+  parseInt(process.env.NANOCLAW_SESSION_IDLE_MS || '1800000', 10) || 1_800_000,
+);
+
 // Per-checkout image tag so two installs on the same host don't share
 // `nanoclaw-agent:latest` and clobber each other on rebuild.
 export const CONTAINER_IMAGE_BASE = process.env.CONTAINER_IMAGE_BASE || getContainerImageBase(PROJECT_ROOT);

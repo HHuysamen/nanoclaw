@@ -7,11 +7,19 @@ import {
   migrateLegacyContinuation,
   setContinuation,
 } from './db/session-state.js';
+import { getOrCreateSession, insertTurn } from './db/vault.js';
+import { getConfig } from './config.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+
+const SESSION_IDLE_MS = (() => {
+  const raw = process.env.NANOCLAW_SESSION_IDLE_MS;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed >= 60_000 ? parsed : 30 * 60 * 1000;
+})();
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -19,6 +27,71 @@ function log(msg: string): void {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function newSessionId(): string {
+  return `vs-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function newTurnId(): string {
+  return `vt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Open (or reuse) the vault session for this turn and log the user content.
+ * Returns the session id, which the result handler uses for the assistant
+ * turn. Throws-safe: any vault failure logs and returns null so the user
+ * reply path is never blocked by a memory-system bug.
+ */
+function logUserTurn(input: {
+  routing: RoutingContext;
+  userContent: string;
+}): string | null {
+  try {
+    const cfg = getConfig();
+    const now = Date.now();
+    const session = getOrCreateSession({
+      agentGroupId: cfg.agentGroupId,
+      channel: input.routing.channelType ?? null,
+      platformId: input.routing.platformId ?? null,
+      threadId: input.routing.threadId ?? null,
+      idleMs: SESSION_IDLE_MS,
+      nowMs: now,
+      newSessionId,
+    });
+    insertTurn({
+      id: newTurnId(),
+      session_id: session.id,
+      agent_group_id: cfg.agentGroupId,
+      ts: now,
+      role: 'user',
+      content: input.userContent,
+      tool_calls: 0,
+      tool_names: null,
+    });
+    return session.id;
+  } catch (e) {
+    log(`vault: user turn log failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+function logAssistantTurn(input: { sessionId: string; content: string }): void {
+  try {
+    const cfg = getConfig();
+    insertTurn({
+      id: newTurnId(),
+      session_id: input.sessionId,
+      agent_group_id: cfg.agentGroupId,
+      ts: Date.now(),
+      role: 'assistant',
+      content: input.content,
+      tool_calls: 0,
+      tool_names: null,
+    });
+  } catch (e) {
+    log(`vault: assistant turn log failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 export interface PollLoopConfig {
@@ -160,6 +233,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    // Adaptive memory — log the user turn before the model call so the vault
+    // captures the exchange even if processQuery throws mid-stream.
+    const sessionId = logUserTurn({ routing, userContent: prompt });
+
     const query = config.provider.query({
       prompt,
       continuation,
@@ -171,7 +248,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, sessionId);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -250,6 +327,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  sessionId: string | null,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -349,6 +427,13 @@ async function processQuery(
         markCompleted(initialBatchIds);
         if (event.text) {
           dispatchResultText(event.text, routing);
+        }
+        // Adaptive memory — log the assistant turn. Empty `event.text` is a
+        // legitimate "turn done, no user-facing reply" case (e.g. an
+        // accumulate-only batch or an MCP-mediated reply via send_message);
+        // record the empty string so we still capture the boundary.
+        if (sessionId) {
+          logAssistantTurn({ sessionId, content: event.text ?? '' });
         }
       }
     }
